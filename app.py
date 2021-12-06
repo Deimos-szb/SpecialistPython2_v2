@@ -1,12 +1,9 @@
-from flask import Flask, abort
+from flask import Flask, abort, jsonify
 import random
 
 
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
-
-def row_maker(quote):
-    return f"Quote {quote['id']}: {quote['text']} {quote['author']} (c)"
 
 quotes = [
    {
@@ -47,13 +44,13 @@ about_me = {
 def show_quote(quote_id):
     for quote in quotes:
         if quote["id"] == quote_id:
-            return row_maker(quote)
+            return jsonify(quote)
     abort(404)
 
 @app.route("/quotes/")
 @app.route("/quotes")
 def show_all_quotes():
-    return ' '.join([row_maker(quote) for quote in quotes])
+    return jsonify(quotes)
 
 @app.route("/quotes/count")
 def show_num_of_qoutes():
@@ -62,7 +59,7 @@ def show_num_of_qoutes():
 @app.route("/quotes/random")
 def show_random_quote():
     quote = random.choice(quotes)
-    return row_maker(quote)
+    return jsonify(quote)
 
 @app.route("/about")
 def about():
