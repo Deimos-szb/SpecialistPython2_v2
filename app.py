@@ -2,6 +2,7 @@ import random
 from pathlib import Path
 from flask import Flask, abort, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
 
 BASE_DIR = Path(__file__).parent
 
@@ -9,62 +10,103 @@ app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False
 app.config['SQLALCHEMY_DATABASE_URI'] = f"sqlite:///{BASE_DIR / 'test.db'}"
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-KEYS = ("id", "author", "text")
-
-# quotes = [
-#    {
-#        "id": 1,
-#        "author": "Rick Cook",
-#        "text": "Программирование сегодня — это гонка разработчиков программ, стремящихся писать программы с большей и лучшей идиотоустойчивостью, и вселенной, которая пытается создать больше отборных идиотов. Пока вселенная побеждает."
-#    },
-#    {
-#        "id": 2,
-#        "author": "Waldi Ravens",
-#        "text": "Программирование на С похоже на быстрые танцы на только что отполированном полу людей с острыми бритвами в руках."
-#    },
-#    {
-#        "id": 3,
-#        "author": "Mosher’s Law of Software Engineering",
-#        "text": "Не волнуйтесь, если что-то не работает. Если бы всё работало, вас бы уволили."
-#    },
-#    {
-#        "id": 4,
-#        "author": "Yoggi Berra",
-#        "text": "В теории, теория и практика неразделимы. На практике это не так."
-#    },
-#
-# ]
-
-# quotes = execute_read_query(connection, "SELECT * FROM quotes")
 
 db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+
+class AuthorModel(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(32))
+    quotes = db.relationship('QuoteModel', backref='author', lazy='select')
+
+    def __init__(self, name):
+        if name is not None:
+            self.name = name
+
+    def to_dict(self):
+        d = {}
+        for column in self.__table__.columns:
+            d[column.name] = str(getattr(self, column.name))
+        return d
 
 class QuoteModel(db.Model):
-   id = db.Column(db.Integer, primary_key=True)
-   author = db.Column(db.String(32), unique=False)
-   text = db.Column(db.String(255), unique=False)
+    id = db.Column(db.Integer, primary_key=True)
+    author_id = db.Column(db.Integer, db.ForeignKey(AuthorModel.id))
+    text = db.Column(db.String(255), unique=False)
 
-   def __init__(self, author, text):
-       self.author = author
-       self.text = text
+    def __init__(self, author, text):
+        self.author_id = author.id
+        self.text = text
 
-   def __repr__(self):
-       return f"a:{self.author}, q:{self.text[:15]}"
+    def to_dict(self):
+        d = {}
+        for column in self.__table__.columns:
+            d[column.name] = str(getattr(self, column.name))
+        del d["author_id"]
+        d["author"] = self.author.to_dict()
+        return d
 
-   def to_dict(self):
-       return {
-           "id": self.id,
-           "author": self.author,
-           "text": self.text,
-       }
+# AUTHORS API
+@app.route('/authors')
+def get_authors():
+    authors = AuthorModel.query.all()
+    if authors is None:
+        abort(404, f"There is no any quote")
+    return jsonify([author.to_dict() for author in authors])
 
-@app.route('/quotes/<int:id>')
-def show_quote(id):
-    quote = QuoteModel.query.get(id)
+
+@app.route('/authors/<int:author_id>')
+def get_author_by_id(author_id):
+    author = AuthorModel.query.get(author_id)
+    if author is None:
+        abort(404, f"Author with id={author_id} not found")
+    return jsonify(author.to_dict())
+
+
+@app.route('/authors/<int:author_id>', methods=['DELETE'])
+def delete_author_by_id(author_id):
+    author = AuthorModel.query.get(author_id)
+    if author is None:
+        abort(404, "Author not found")
+    quotes = QuoteModel.query.filter(QuoteModel.author.has(name=author.name)).all()
+    for quote in quotes:
+        db.session.delete(quote)
+    db.session.delete(author)
+    db.session.commit()
+    return jsonify(author.to_dict()), 200
+
+
+@app.route('/authors', methods=['POST'])
+def add_new_author():
+    new_author = request.json
+    author = AuthorModel(**new_author)
+    db.session.add(author)
+    db.session.commit()
+    return jsonify(author.to_dict()), 201
+
+@app.route('/authors/<int:id>', methods=['PUT'])
+def change_author(id):
+    return {}
+
+
+# QUOTES API
+@app.route('/author/<int:author_id>/quotes/<int:quote_id>')
+def show_quote(author_id, quote_id):
+    quote = QuoteModel.query.get(quote_id)
     if quote is None:
-        abort(404, f"quote with id={id} not found")
+        abort(404, f"quote with id={qoute_id} not found")
+    if quote.author_id != author_id:
+        abort(404, f"Цитата с id={quote_id} принадлежит не автору с id={author_id}")
     return jsonify(quote.to_dict())
 
+
+@app.route("/author/<int:author_id>/quotes")
+def get_all_quotes_of_author(author_id):
+    author = AuthorModel.query.get(author_id)
+    if author is None:
+        abort(404, "Author not found")
+    quotes = QuoteModel.query.filter(QuoteModel.author.has(name=author.name)).all()
+    return jsonify([quote.to_dict() for quote in quotes])
 
 @app.route("/quotes/")
 @app.route("/quotes")
@@ -75,55 +117,61 @@ def show_all_quotes():
     return jsonify([quote.to_dict() for quote in quotes])
 
 
-@app.route("/quotes/<int:id>", methods=['DELETE'])
-def delete(id):
-    quote = QuoteModel.query.get(id)
+@app.route("/author/<int:author_id>/quotes/<int:quote_id>", methods=['DELETE'])
+def delete(author_id, quote_id):
+    quote = QuoteModel.query.get(quote_id)
     if quote is None:
         abort(404, "Quote not found")
+    if quote.author_id != author_id:
+        abort(404, f"Цитата с id={quote_id} принадлежит не автору с id={author_id}")
     db.session.delete(quote)
     db.session.commit()
-    return jsonify(quote.to_dict())
-
-@app.route("/quotes/<int:id>", methods=['PUT'])
-def edit_quote(id):
-   new_data = request.json
-   # for quote in quotes:
-   #     if quote["id"] == id:
-   #         if new_data.get("author"):
-   #             quote["author"] = new_data["author"]
-   #         if new_data.get("text"):
-   #             quote["text"] = new_data["text"]
-   #         return jsonify(quote), 200
-   quote = QuoteModel.query.get(id)
-   if quote is None:
-       abort(404, f"quote with id={id} not found")
-   quote.author = new_data["author"] if "author" in new_data.keys() else quote.author
-   quote.text = new_data["text"] if "text" in new_data.keys() else qoute.text
-   db.session.commit()
-   return jsonify(quote.to_dict())
+    # FIXME: Цитату находит и удаляет, но крашится при возврате цитаты из-за DetachedInstanceError:
+    #  Parent instance <QuoteModel at 0x7f24b4336d90> is not bound to a Session; lazy load operation
+    #  of attribute 'author' cannot proceed
+    return jsonify(quote.to_dict()), 200
 
 
+@app.route("/author/<int:author_id>/quotes/<int:quote_id>", methods=['PUT'])
+def edit_quote(author_id, quote_id):
+    new_data = request.json
+    quote = QuoteModel.query.get(quote_id)
+    author = AuthorModel.query.get(author_id)
+    new_author = None
+    if new_data.get("author"):
+        new_author = AuthorModel(**new_data.get("author"))
+    author = new_author or author
+    if new_data.get("text"):
+        new_text = new_data.get("text")
+    if quote is None or author is None:
+        abort(404, "No such author or quote")
+    quote.author = author
+    quote.text = new_text or quote.text
+    db.session.commit()
+    return jsonify(quote.to_dict()), 200
 
-@app.route("/quotes", methods=['POST'])
-def create_quote():
+
+@app.route("/author/<int:author_id>/quotes", methods=['POST'])
+def create_quote(author_id):
     new_quote = request.json
+    author = AuthorModel.query.get(author_id)
+    if author is None:
+        abort(404, 'There is no such author')
     try:
-        q1 = QuoteModel(new_quote["author"], new_quote["text"])
+        q = QuoteModel(author, new_quote["text"])
     except KeyError:
         abort(400, "There must be author and text for quote")
-    db.session.add(q1)
+    db.session.add(q)
     db.session.commit()
-    return jsonify(q1.to_dict()), 201
-
+    return jsonify(q.to_dict()), 201
 
 
 @app.route("/quotes/random")
 def show_random_quote():
+    # TODO: Перейти на ORM
     quote = random.choice(quotes)
     return jsonify(quote)
 
 
-
-
 if __name__ == "__main__":
-   app.run(debug=True)
+    app.run(debug=True)
